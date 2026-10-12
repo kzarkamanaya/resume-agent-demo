@@ -49,6 +49,7 @@ from __future__ import annotations
 import json
 import os
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Set
 
@@ -637,6 +638,40 @@ def build_decision(raw: Dict[str, Any]) -> DraftResult:
     )
 
 
+def decision_to_dict(decision: DraftResult) -> Dict[str, Any]:
+    """Inverse of build_decision(): serialize a DraftResult back into
+    the same raw-dict shape validate_decision()/build_decision() expect.
+    Used by main()'s --save-json so a saved draft can be re-validated
+    and re-rendered later (by document.py) without the original API
+    response."""
+    return {
+        "professional_summary": decision.professional_summary,
+        "summary_evidence_ids": list(decision.summary_evidence_ids),
+        "resume_sections": [
+            {
+                "section": section.section,
+                "entries": [
+                    {
+                        "source_chunk_id": entry.source_chunk_id,
+                        "bullets": [
+                            {"text": bullet.text, "evidence_ids": list(bullet.evidence_ids)}
+                            for bullet in entry.bullets
+                        ],
+                    }
+                    for entry in section.entries
+                ],
+            }
+            for section in decision.resume_sections
+        ],
+        "selected_evidence": [
+            {"chunk_id": item.chunk_id, "reason": item.reason} for item in decision.selected_evidence
+        ],
+        "omitted_evidence": [
+            {"chunk_id": item.chunk_id, "reason": item.reason} for item in decision.omitted_evidence
+        ],
+    }
+
+
 def draft_resume_content(job_text: str, chunks: List[Chunk], model: str, client: Any) -> DraftOutcome:
     """Make exactly one OpenAI Responses API request and return a
     validated DraftOutcome.
@@ -832,6 +867,13 @@ def main(argv: Optional[List[str]] = None) -> int:
         default=PROFILE_PATH,
         help="Path to resume_profile.md (defaults to the one next to retrieval.py).",
     )
+    parser.add_argument(
+        "--save-json",
+        type=Path,
+        default=None,
+        help="Save the validated draft plus model/usage metadata (no credentials) as JSON at this path, "
+        "e.g. outputs/draft.json, so document.py can render it later without another API call.",
+    )
     args = parser.parse_args(argv)
 
     extraction = extract_pdf_text(args.job_pdf)
@@ -878,6 +920,27 @@ def main(argv: Optional[List[str]] = None) -> int:
     except OpenAIError:
         print("An OpenAI SDK error occurred while requesting a draft.")
         return 1
+
+    if args.save_json is not None:
+        save_payload = {
+            "schema_version": 1,
+            "saved_at": datetime.now(timezone.utc).isoformat(),
+            "model": outcome.model,
+            "usage": (
+                {
+                    "input_tokens": outcome.usage.input_tokens,
+                    "output_tokens": outcome.usage.output_tokens,
+                    "total_tokens": outcome.usage.total_tokens,
+                }
+                if outcome.usage is not None
+                else None
+            ),
+            "draft": decision_to_dict(outcome.decision),
+        }
+        args.save_json.parent.mkdir(parents=True, exist_ok=True)
+        with open(args.save_json, "w", encoding="utf-8") as fh:
+            json.dump(save_payload, fh, indent=2, ensure_ascii=False)
+        print(f"Saved validated draft to: {args.save_json}")
 
     print(f"Model used: {_format_model(outcome.model)}")
     _print_token_usage(outcome.usage)

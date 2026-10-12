@@ -33,6 +33,7 @@ from decision import (
     build_messages,
     build_response_schema,
     collect_full_evidence,
+    decision_to_dict,
     draft_resume_content,
     main,
     validate_decision,
@@ -344,6 +345,26 @@ class TestBuildDecision(unittest.TestCase):
         self.assertEqual(entry.bullets[0].evidence_ids, ["a", "b"])
         self.assertEqual(len(decision.selected_evidence), 2)
         self.assertEqual(len(decision.omitted_evidence), 1)
+
+    def test_decision_to_dict_round_trips_through_validate_and_build(self):
+        """decision_to_dict() is the save path's serializer; round-tripping
+        through it, validate_decision(), and build_decision() must land
+        back on an equivalent DraftResult - this is what makes a saved
+        draft safely re-renderable later."""
+        original = build_decision(_base_raw())
+
+        raw_again = decision_to_dict(original)
+        self.assertEqual(validate_decision(raw_again, KNOWN_IDS), [])
+
+        rebuilt = build_decision(raw_again)
+
+        self.assertEqual(rebuilt.professional_summary, original.professional_summary)
+        self.assertEqual(rebuilt.summary_evidence_ids, original.summary_evidence_ids)
+        self.assertEqual(
+            [item.chunk_id for item in rebuilt.selected_evidence],
+            [item.chunk_id for item in original.selected_evidence],
+        )
+        self.assertEqual(rebuilt.resume_sections[0].entries[0].source_chunk_id, "a")
 
 
 # --- Fakes for TestDraftResumeContent -----------------------------------
