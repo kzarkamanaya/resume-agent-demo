@@ -413,24 +413,28 @@ def retrieve_relevant_chunks(
     return matches[:top_k]
 
 
-def format_shared_terms(term_contributions: Dict[str, float], limit: int = 5) -> str:
+def format_shared_terms(ranked_term_contributions: List[Tuple[str, float]], limit: int = 5) -> str:
     """Render the highest-contributing shared terms for display only.
 
     Purpose: lets CLI/demo output show *why* a chunk matched without
     dumping every shared n-gram; it never feeds back into scoring.
-    Terms are ranked by contribution (ties broken by term name) and only
-    the top `limit` are shown, with a trailing note naming how many more
-    were left out of the display.
+
+    Input: `ranked_term_contributions` must already be a list of
+    (term, contribution) pairs in the order to display - descending by
+    contribution, ties broken by term name - e.g.
+    `sorted(item.shared_terms.items(), key=lambda kv: (-kv[1], kv[0]))`.
+    This function only truncates and formats; it does not sort, so a
+    caller passing an unsorted dict's `.items()` unsorted would get that
+    same order back, just truncated.
 
     Returns e.g. "python (0.182), sql (0.091) (+6 more shared terms not
-    shown)", or "(no shared terms)" if the dict is empty.
+    shown)", or "(no shared terms)" if the list is empty.
     """
-    if not term_contributions:
+    if not ranked_term_contributions:
         return "(no shared terms)"
 
-    ranked = sorted(term_contributions.items(), key=lambda kv: (-kv[1], kv[0]))
-    shown = ranked[:limit]
-    remaining = len(ranked) - len(shown)
+    shown = ranked_term_contributions[:limit]
+    remaining = len(ranked_term_contributions) - len(shown)
 
     rendered = ", ".join(f"{term} ({weight:.3f})" for term, weight in shown)
     if remaining > 0:

@@ -673,19 +673,36 @@ def decision_to_dict(decision: DraftResult) -> Dict[str, Any]:
 
 
 def draft_resume_content(job_text: str, chunks: List[Chunk], model: str, client: Any) -> DraftOutcome:
-    """Make exactly one OpenAI Responses API request and return a
-    validated DraftOutcome.
+    """Compute evidence from `chunks`, then draft. A thin wrapper around
+    draft_resume_content_with_evidence() for callers (the CLI) that
+    don't already have an evidence list - see that function for the
+    full contract (exactly one request, max_retries=0, DraftingError on
+    refusal/incomplete/invalid content). Callers who already computed
+    evidence (e.g. to display it) should call
+    draft_resume_content_with_evidence() directly instead, so TF-IDF is
+    only calculated once.
+    """
+    evidence = collect_full_evidence(job_text, chunks)
+    return draft_resume_content_with_evidence(evidence, job_text, model, client)
 
-    Input: job_text/chunks (passed straight to collect_full_evidence/
-    build_messages), `model` (an explicit model name - this function
-    never chooses or hard-codes one), and `client` - any object exposing
-    `.responses.create(...)` and `.with_options(...)` the way
-    openai.OpenAI does. Constructing that client, including sourcing
-    OPENAI_API_KEY, is entirely the caller's responsibility; this
-    function never reads credentials and never constructs a client
-    itself. It does call `client.with_options(max_retries=0)` before the
-    request, so the one-request bound holds regardless of how the
-    caller's client was configured.
+
+def draft_resume_content_with_evidence(
+    evidence: List[EvidenceItem], job_text: str, model: str, client: Any
+) -> DraftOutcome:
+    """Make exactly one OpenAI Responses API request from an
+    already-computed evidence list, and return a validated DraftOutcome.
+
+    Input: `evidence` (from collect_full_evidence - computed once by
+    the caller, not recomputed here), `job_text` (used only to build
+    the prompt, via build_messages), `model` (an explicit model name -
+    this function never chooses or hard-codes one), and `client` - any
+    object exposing `.responses.create(...)` and `.with_options(...)`
+    the way openai.OpenAI does. Constructing that client, including
+    sourcing OPENAI_API_KEY, is entirely the caller's responsibility;
+    this function never reads credentials and never constructs a
+    client itself. It does call `client.with_options(max_retries=0)`
+    before the request, so the one-request bound holds regardless of
+    how the caller's client was configured.
 
     Output: DraftOutcome(decision, model, usage) - `model` is the model
     name the response itself reports (not just an echo of the argument -
@@ -702,7 +719,6 @@ def draft_resume_content(job_text: str, chunks: List[Chunk], model: str, client:
     if not isinstance(model, str) or not model.strip():
         raise ValueError("model must be a non-blank string")
 
-    evidence = collect_full_evidence(job_text, chunks)
     known_chunk_ids = {item.chunk_id for item in evidence}
     messages = build_messages(job_text, evidence)
     schema = build_response_schema()

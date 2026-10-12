@@ -12,7 +12,7 @@ Run with: .venv/Scripts/python.exe -m unittest discover -s tests -t .
 
 import unittest
 
-from retrieval import Chunk, retrieve_relevant_chunks
+from retrieval import Chunk, format_shared_terms, retrieve_relevant_chunks
 
 
 def make_chunk(chunk_id: str, text: str, section: str = "project", title: str | None = None) -> Chunk:
@@ -149,6 +149,36 @@ class TestRetrieveRelevantChunks(unittest.TestCase):
         matches = retrieve_relevant_chunks(job_text, chunks)
 
         self.assertEqual(matches, [])
+
+
+class TestFormatSharedTerms(unittest.TestCase):
+    """format_shared_terms() takes an already-sorted list of (term,
+    contribution) pairs - it only truncates/formats, it does not sort.
+    A raw, unsorted dict (or its unsorted .items()) is NOT the expected
+    input; the caller must sort first (see retrieve_relevant_chunks's
+    own RetrievalMatch.term_contributions construction for the standard
+    sort key: descending contribution, ties broken by term name)."""
+
+    def test_formats_pre_sorted_pairs_with_truncation_note(self):
+        pairs = [("python", 0.182), ("sql", 0.091), ("pandas", 0.05), ("r", 0.02), ("sql server", 0.01), ("excel", 0.005)]
+
+        rendered = format_shared_terms(pairs, limit=3)
+
+        self.assertEqual(
+            rendered, "python (0.182), sql (0.091), pandas (0.050) (+3 more shared terms not shown)"
+        )
+
+    def test_does_not_sort_unsorted_input_itself(self):
+        """Documents that format_shared_terms trusts caller ordering -
+        passing pairs out of order renders them out of order too."""
+        unsorted_pairs = [("sql", 0.091), ("python", 0.182)]
+
+        rendered = format_shared_terms(unsorted_pairs)
+
+        self.assertEqual(rendered, "sql (0.091), python (0.182)")
+
+    def test_empty_list_reports_no_shared_terms(self):
+        self.assertEqual(format_shared_terms([]), "(no shared terms)")
 
 
 if __name__ == "__main__":
