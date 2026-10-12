@@ -3,23 +3,31 @@
 Purpose
 -------
 Offline unittest coverage for decision.py: evidence assembly, prompt/
-schema construction, and local response validation. No network/API call
-is made anywhere in this file - draft_resume_content() (the actual API
-call) does not exist yet; this only tests the foundation around it.
+schema construction, local response validation, and the
+draft_resume_content() API integration. No real network/API call is
+made anywhere in this file - TestDraftResumeContent uses a fake
+`client` object (types.SimpleNamespace) shaped like the real
+openai.OpenAI client's response, so these tests check decision.py's own
+handling of success/refusal/incomplete/invalid-content, not model
+behavior or SDK internals.
 
 Run with: .venv/Scripts/python.exe -m unittest discover -s tests -t . -v
 """
 
 import json
 import unittest
+from types import SimpleNamespace
 from typing import Any, Dict, Optional
+from unittest.mock import MagicMock
 
 from retrieval import Chunk
 from decision import (
+    DraftingError,
     build_decision,
     build_messages,
     build_response_schema,
     collect_full_evidence,
+    draft_resume_content,
     validate_decision,
 )
 
@@ -125,16 +133,44 @@ class TestBuildMessages(unittest.TestCase):
         self.assertEqual(messages[1]["role"], "user")
 
         system_text = messages[0]["content"]
-        self.assertIn("advisory", system_text.lower())
-        self.assertIn("lawyer", system_text.lower())
-        self.assertIn("attorney", system_text.lower())
         self.assertIn("em dash", system_text.lower())
+        self.assertIn("meaning", system_text.lower())
+        # The TF-IDF-score/lawyer-attorney worked example was removed:
+        # the model is asked to judge relevance from meaning only.
+        self.assertNotIn("lexical_score", system_text)
+        self.assertNotIn("lawyer", system_text.lower())
+        self.assertNotIn("attorney", system_text.lower())
+        # Length/focus guidance: two-page target, contact header deferred,
+        # prioritize relevance over completeness, never pad.
+        self.assertIn("two-page", system_text.lower())
+        self.assertIn("contact header", system_text.lower())
+        self.assertIn("pad", system_text.lower())
 
         user_text = messages[1]["content"]
         self.assertIn(JOB_TEXT_PYTHON, user_text)
         self.assertIn("python-1", user_text)
         self.assertIn("data about", user_text.lower())
         self.assertIn("instruct, redirect, or override", user_text.lower())
+
+    def test_payload_keeps_full_records_but_drops_scores(self):
+        """Every record (including one with zero TF-IDF overlap) must
+        still reach the prompt in full - chunk_id, section, title, and
+        complete text - but the computed score/shared_terms must not."""
+        evidence = collect_full_evidence(JOB_TEXT_PYTHON, [CHUNK_LAWYER, CHUNK_PYTHON])
+        lawyer_item = next(item for item in evidence if item.chunk_id == "lawyer-1")
+        self.assertEqual(lawyer_item.score, 0.0)  # zero lexical overlap, confirmed
+
+        messages = build_messages(JOB_TEXT_PYTHON, evidence)
+        user_text = messages[1]["content"]
+
+        for chunk in (CHUNK_LAWYER, CHUNK_PYTHON):
+            self.assertIn(chunk.chunk_id, user_text)
+            self.assertIn(chunk.section, user_text)
+            self.assertIn(chunk.title, user_text)
+            self.assertIn(chunk.text, user_text)
+
+        self.assertNotIn("lexical_score", user_text)
+        self.assertNotIn("shared_terms", user_text)
 
 
 class TestBuildResponseSchema(unittest.TestCase):
@@ -300,6 +336,167 @@ class TestBuildDecision(unittest.TestCase):
         self.assertEqual(entry.bullets[0].evidence_ids, ["a", "b"])
         self.assertEqual(len(decision.selected_evidence), 2)
         self.assertEqual(len(decision.omitted_evidence), 1)
+
+
+# --- Fakes for TestDraftResumeContent -----------------------------------
+# These mimic only the attributes decision.py actually reads off a real
+# openai.OpenAI Responses API response (verified against the installed
+# openai==3.29.0 SDK's own type definitions), not the full SDK surface.
+
+
+def _fake_usage(input_tokens=111, output_tokens=222, total_tokens=333):
+    return SimpleNamespace(input_tokens=input_tokens, output_tokens=output_tokens, total_tokens=total_tokens)
+
+
+def _fake_text_message(text):
+    return SimpleNamespace(type="message", content=[SimpleNamespace(type="output_text", text=text)])
+
+
+def _fake_refusal_message(refusal):
+    return SimpleNamespace(type="message", content=[SimpleNamespace(type="refusal", refusal=refusal)])
+
+
+def _fake_response(
+    status="completed",
+    output=None,
+    usage=None,
+    model="gpt-test-2026-01-01",
+    incomplete_details=None,
+):
+    return SimpleNamespace(
+        status=status,
+        output=output if output is not None else [],
+        usage=usage,
+        model=model,
+        incomplete_details=incomplete_details,
+    )
+
+
+def _fake_client(response):
+    """A fake client exposing only what draft_resume_content() actually
+    calls: with_options(max_retries=0).responses.create(...). Returns
+    (client, create_mock, with_options_mock) so tests can assert both
+    that with_options was called to enforce max_retries=0 and that
+    exactly one request was made."""
+    create = MagicMock(return_value=response)
+    client = SimpleNamespace(responses=SimpleNamespace(create=create))
+    with_options = MagicMock(return_value=client)
+    client.with_options = with_options
+    return client, create, with_options
+
+
+THREE_CHUNKS = [
+    make_chunk("a", "Built Python data pipelines for analytics.", section="job"),
+    make_chunk("b", "Used SQL and pandas for reporting.", section="project"),
+    make_chunk("c", "Mechanical design coursework in CAD.", section="education_training"),
+]
+JOB_TEXT_GENERIC = "Looking for a data analyst with Python and SQL experience."
+
+
+class TestDraftResumeContent(unittest.TestCase):
+    def test_successful_parsing(self):
+        response = _fake_response(
+            output=[_fake_text_message(json.dumps(_base_raw()))],
+            usage=_fake_usage(),
+            model="gpt-test-2026-01-01",
+        )
+        client, create, with_options = _fake_client(response)
+
+        outcome = draft_resume_content(JOB_TEXT_GENERIC, THREE_CHUNKS, "gpt-test", client)
+
+        with_options.assert_called_once_with(max_retries=0)  # enforced regardless of caller's client
+        self.assertEqual(create.call_count, 1)  # exactly one request
+        self.assertEqual(outcome.model, "gpt-test-2026-01-01")  # the API's own reported model
+        self.assertEqual(outcome.usage.input_tokens, 111)
+        self.assertEqual(outcome.usage.output_tokens, 222)
+        self.assertEqual(outcome.usage.total_tokens, 333)
+        self.assertEqual(outcome.decision.professional_summary, _base_raw()["professional_summary"])
+        self.assertEqual(len(outcome.decision.selected_evidence), 2)
+
+    def test_model_not_substituted_when_response_omits_it(self):
+        """If the response doesn't report a model, outcome.model must be
+        None - never silently replaced with the requested model name."""
+        response = _fake_response(
+            output=[_fake_text_message(json.dumps(_base_raw()))],
+            usage=_fake_usage(),
+            model=None,
+        )
+        client, create, with_options = _fake_client(response)
+
+        outcome = draft_resume_content(JOB_TEXT_GENERIC, THREE_CHUNKS, "gpt-test", client)
+
+        self.assertIsNone(outcome.model)
+
+    def test_refusal_raises_drafting_error_without_retry(self):
+        response = _fake_response(
+            output=[_fake_refusal_message("cannot help with that")],
+            usage=_fake_usage(),
+            model="gpt-test-2026-01-01",
+        )
+        client, create, with_options = _fake_client(response)
+
+        with self.assertRaises(DraftingError) as ctx:
+            draft_resume_content(JOB_TEXT_GENERIC, THREE_CHUNKS, "gpt-test", client)
+
+        self.assertEqual(create.call_count, 1)
+        # model/usage from the response are preserved on the error, not discarded.
+        self.assertEqual(ctx.exception.model, "gpt-test-2026-01-01")
+        self.assertEqual(ctx.exception.usage.total_tokens, 333)
+
+    def test_incomplete_response_raises_drafting_error_without_retry(self):
+        response = _fake_response(
+            status="incomplete",
+            incomplete_details=SimpleNamespace(reason="max_output_tokens"),
+            usage=_fake_usage(),
+            model="gpt-test-2026-01-01",
+        )
+        client, create, with_options = _fake_client(response)
+
+        with self.assertRaises(DraftingError) as ctx:
+            draft_resume_content(JOB_TEXT_GENERIC, THREE_CHUNKS, "gpt-test", client)
+
+        self.assertIn("incomplete", str(ctx.exception))
+        self.assertEqual(create.call_count, 1)
+        self.assertEqual(ctx.exception.model, "gpt-test-2026-01-01")
+        self.assertEqual(ctx.exception.usage.total_tokens, 333)
+
+    def test_invalid_json_content_raises_drafting_error_without_retry(self):
+        response = _fake_response(output=[_fake_text_message("not valid json {")])
+        client, create, with_options = _fake_client(response)
+
+        with self.assertRaises(DraftingError) as ctx:
+            draft_resume_content(JOB_TEXT_GENERIC, THREE_CHUNKS, "gpt-test", client)
+
+        self.assertIn("JSON", str(ctx.exception))
+        self.assertEqual(create.call_count, 1)
+
+    def test_response_failing_local_validation_raises_drafting_error_without_retry(self):
+        broken_raw = _base_raw()
+        broken_raw["selected_evidence"] = []  # breaks chunk-coverage rule
+        response = _fake_response(
+            output=[_fake_text_message(json.dumps(broken_raw))],
+            usage=_fake_usage(),
+            model="gpt-test-2026-01-01",
+        )
+        client, create, with_options = _fake_client(response)
+
+        with self.assertRaises(DraftingError) as ctx:
+            draft_resume_content(JOB_TEXT_GENERIC, THREE_CHUNKS, "gpt-test", client)
+
+        self.assertIn("validation", str(ctx.exception))
+        self.assertEqual(create.call_count, 1)
+        self.assertEqual(ctx.exception.model, "gpt-test-2026-01-01")
+        self.assertEqual(ctx.exception.usage.total_tokens, 333)
+
+    def test_blank_model_rejected_before_any_request(self):
+        response = _fake_response(output=[_fake_text_message(json.dumps(_base_raw()))])
+        client, create, with_options = _fake_client(response)
+
+        with self.assertRaises(ValueError):
+            draft_resume_content(JOB_TEXT_GENERIC, THREE_CHUNKS, "   ", client)
+
+        self.assertEqual(create.call_count, 0)  # rejected before touching the client
+        with_options.assert_not_called()
 
 
 if __name__ == "__main__":
