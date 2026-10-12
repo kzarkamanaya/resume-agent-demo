@@ -264,8 +264,13 @@ def run_pipeline(pdf_path: Optional[str], model: str) -> Generator[Tuple[str, Op
 
         if render_result.status == "verified_two_pages":
             yield emit("Download enabled: exactly two pages verified."), str(render_result.docx_path)
+        elif render_result.status == "generated_target_not_met":
+            yield emit(
+                "Download enabled: document generated successfully, but the two-page target was not met "
+                "(see page count above)."
+            ), str(render_result.docx_path)
         else:
-            yield emit("Download not enabled: an exact two-page render was not verified."), None
+            yield emit("Download not enabled: document generation or rendering did not succeed."), None
 
     finally:
         _RUN_LOCK.release()

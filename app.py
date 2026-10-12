@@ -31,7 +31,8 @@ def build_app() -> gr.Blocks:
             label="Processing trace", lines=20, max_lines=50, interactive=False, autoscroll=True
         )
         download_output = gr.File(
-            label="Download resume.docx (enabled only once exactly 2 pages are verified)", interactive=False
+            label="Download resume.docx (two pages is the target; a generated document at another page count is still offered)",
+            interactive=False,
         )
 
         generate_button.click(

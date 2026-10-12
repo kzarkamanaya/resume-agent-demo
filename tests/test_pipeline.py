@@ -176,6 +176,33 @@ class TestRunPipelineSuccess(unittest.TestCase):
         self.assertIn("some-other-model", final_text)
 
     def test_render_failure_clears_download(self):
+        """A genuine rendering failure (e.g. LibreOffice conversion
+        error) must still block the download."""
+        fake_extraction = SimpleNamespace(full_text=JOB_TEXT, warnings=[])
+        response = _fake_response(output=[_fake_text_message(json.dumps(GOOD_RAW_DRAFT))], usage=_fake_usage())
+        fake_client, create = _fake_client(response)
+
+        with patch("pipeline.extract_pdf_text", return_value=fake_extraction), patch(
+            "pipeline.load_profile", return_value=({}, CONTACT, CHUNKS)
+        ), patch("pipeline._resolve_api_key", return_value="sk-synthetic-test-key"), patch(
+            "pipeline.OpenAI", return_value=fake_client
+        ), patch(
+            "pipeline.render_and_verify",
+            return_value=RenderResult(
+                docx_path=self.tmp_dir / "resume.docx", pdf_path=None, page_count=None, preset_name="comfortable",
+                status="failed_conversion_error", message="LibreOffice conversion failed.", attempts=[("comfortable", None)],
+            ),
+        ), patch("pipeline.OUTPUTS_DIR", self.tmp_dir):
+            results = list(pipeline.run_pipeline("job.pdf", "gpt-6.1-sol"))
+
+        final_text, final_download = results[-1]
+        self.assertIsNone(final_download)
+        self.assertIn("not enabled", final_text.lower())
+
+    def test_target_not_met_still_offers_download(self):
+        """Two pages is a target, not a requirement: a successful
+        render that lands on 1 or 3+ pages must still offer a
+        download, clearly labeled as not having met the target."""
         fake_extraction = SimpleNamespace(full_text=JOB_TEXT, warnings=[])
         response = _fake_response(output=[_fake_text_message(json.dumps(GOOD_RAW_DRAFT))], usage=_fake_usage())
         fake_client, create = _fake_client(response)
@@ -188,14 +215,17 @@ class TestRunPipelineSuccess(unittest.TestCase):
             "pipeline.render_and_verify",
             return_value=RenderResult(
                 docx_path=self.tmp_dir / "resume.docx", pdf_path=None, page_count=3, preset_name="tight",
-                status="failed_wrong_page_count", message="never hit 2 pages", attempts=[("comfortable", 3), ("compact", 3), ("tight", 3)],
+                status="generated_target_not_met",
+                message="Generated 3 page(s); two-page target not met.",
+                attempts=[("comfortable", 3), ("compact", 3), ("tight", 3)],
             ),
         ), patch("pipeline.OUTPUTS_DIR", self.tmp_dir):
             results = list(pipeline.run_pipeline("job.pdf", "gpt-6.1-sol"))
 
         final_text, final_download = results[-1]
-        self.assertIsNone(final_download)
-        self.assertIn("not enabled", final_text.lower())
+        self.assertIsNotNone(final_download)
+        self.assertIn("Generated 3 page(s); two-page target not met.", final_text)
+        self.assertIn("download enabled", final_text.lower())
 
     def test_blank_extracted_text_stops_before_any_api_call(self):
         fake_extraction = SimpleNamespace(full_text="   ", warnings=["no extractable text"])

@@ -71,7 +71,7 @@ Each run makes **up to one** paid drafting request (not "exactly one" - invalid 
 
 ## Download gating
 
-A download is only offered once LibreOffice renders the document to **exactly two pages**. Microsoft Word can paginate the same document slightly differently than LibreOffice, so this is the best local check available, not an absolute guarantee of what Word will show you.
+Two rendered pages is the **target**, not a hard requirement for getting a file. If LibreOffice renders the document to exactly two pages, the trace reports that as verified. If a *successful* render lands on some other page count (one page, or three or more even after trying the tighter formatting presets), the document is still offered as a download, clearly labeled "Generated N pages; two-page target not met." - it is a real, usable document, just not at the target length. A download is only withheld when document generation or rendering itself fails (not when it merely misses the target). Microsoft Word can paginate the same document slightly differently than LibreOffice either way, so a "verified" count is the best local check available, not an absolute guarantee of what Word will show you.
 
 ## Known limits
 
@@ -82,13 +82,7 @@ A download is only offered once LibreOffice renders the document to **exactly tw
 
 ## Not implemented: automatic shortening
 
-If a render comes out overlong or underlength, the run stops and reports that clearly - it does **not** automatically request a shorter draft, and it never pads or cuts content to force a page count. No download is offered in that case.
-
-## Before a live class demo
-
-- Install dependencies (`pip install -r requirements.txt`) and confirm LibreOffice is installed *before* the demo, not live.
-- Test with a job description the app hasn't seen before, so the result isn't memorized/cached behavior.
-- Keep a previously-verified resume output and a few screenshots as a fallback in case live rendering or the API has an issue. Never screenshot `.env` or any API key.
+Two pages is a target the formatting presets try to hit, not something the app will force by editing content. If every attempt renders successfully but none lands on exactly two pages, the best available document is still offered as a fallback download (see "Download gating" above) - the run does **not** automatically request a shorter draft from the model, and it never pads or cuts content to chase the target.
 
 ## Testing notes
 

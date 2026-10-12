@@ -320,17 +320,19 @@ class TestRenderAndVerifyMocked(unittest.TestCase):
                 GOOD_DECISION, GOOD_CONTACT, ALL_CHUNKS, self.docx_path, soffice_path=Path(__file__)
             )
 
-        self.assertEqual(result.status, "failed_wrong_page_count")
+        self.assertEqual(result.status, "generated_target_not_met")
         self.assertEqual(result.page_count, 3)
         self.assertEqual(mock_count.call_count, len(FORMATTING_PRESETS))
         self.assertLessEqual(mock_count.call_count, 3)
         self.assertEqual(result.attempts, [("comfortable", 3), ("compact", 3), ("tight", 3)])
         self.assertNotIn("best", result.message.lower())
+        self.assertIn("Generated 3 page(s); two-page target not met.", result.message)
 
     def test_stops_immediately_on_undersized_render_without_trying_tighter_presets(self):
         """A render that comes back under two pages must stop right
         away - a tighter preset would only shrink it further, so none
-        should be tried, and this must not be confused with success."""
+        should be tried. This is now a successful-but-off-target
+        render (downloadable), not a failure."""
         with patch("document.convert_docx_to_pdf", return_value=Path("fake.pdf")) as mock_convert, patch(
             "document.count_pdf_pages", return_value=1
         ) as mock_count:
@@ -338,11 +340,12 @@ class TestRenderAndVerifyMocked(unittest.TestCase):
                 GOOD_DECISION, GOOD_CONTACT, ALL_CHUNKS, self.docx_path, soffice_path=Path(__file__)
             )
 
-        self.assertEqual(result.status, "failed_insufficient_content")
+        self.assertEqual(result.status, "generated_target_not_met")
         self.assertEqual(result.page_count, 1)
         self.assertEqual(result.preset_name, "comfortable")
         self.assertEqual(mock_convert.call_count, 1)  # no tighter preset was tried
         self.assertEqual(mock_count.call_count, 1)
+        self.assertIn("Generated 1 page(s); two-page target not met.", result.message)
         self.assertEqual(result.attempts, [("comfortable", 1)])
 
     def test_each_attempt_gets_a_fresh_unique_directory(self):

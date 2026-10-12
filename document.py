@@ -444,12 +444,16 @@ class RenderResult:
     LibreOffice conversion actually produced a page count (they reflect
     the LAST attempt made, not necessarily a "best" one - see
     `attempts` for the full, factual history). status: one of
-    "verified_two_pages", "unverified_no_libreoffice",
-    "failed_conversion_error", "failed_insufficient_content",
-    "failed_wrong_page_count". attempts: every (preset_name, page_count)
-    actually tried, in order, for honest reporting - never implies any
-    one of them was selected as "best" unless status is
-    "verified_two_pages" (in which case it's the last entry)."""
+    "verified_two_pages" (exact target hit - the only one eligible for
+    a "verified" download message), "generated_target_not_met" (a
+    successful render that did not land on exactly two pages - still a
+    real, downloadable document), "unverified_no_libreoffice", or
+    "failed_conversion_error" (these last two block the download -
+    nothing was reliably produced/measured). attempts: every
+    (preset_name, page_count) actually tried, in order, for honest
+    reporting - never implies any one of them was selected as "best"
+    unless status is "verified_two_pages" (in which case it's the last
+    entry)."""
 
     docx_path: Path
     pdf_path: Optional[Path]
@@ -476,18 +480,33 @@ def render_and_verify(
 ) -> RenderResult:
     """Build the .docx and, if LibreOffice is available, try up to
     len(FORMATTING_PRESETS) presets, from most spacious to tightest,
-    looking for an exact two-page render. Never pads content and never
-    calls the API - this only measures what build_docx() already
-    produced.
+    looking for an exact two-page render. Never pads content, never
+    deletes content, and never calls the API - this only measures what
+    build_docx() already produced.
 
-    Only exactly TARGET_PAGE_COUNT pages counts as success. An overlong
-    render (more pages) continues on to the next, tighter preset. An
-    undersized render (fewer pages) stops immediately with
-    "failed_insufficient_content" instead of trying tighter presets -
-    a tighter preset can only shrink an already-too-short document
-    further, so trying one would not help; this is reported as a
-    decision for a human (add more supported content, or accept a
-    shorter resume), not resolved automatically here.
+    Exactly TARGET_PAGE_COUNT pages is the *target*, not a hard
+    requirement for offering a download: any successfully-rendered
+    page count (1, 2, 3+) results in a usable .docx and a status that
+    is never "failed" - only an actual document-generation error
+    (DocumentGenerationError, raised before this returns) or a
+    rendering/conversion error blocks the download (see
+    "failed_conversion_error" / "unverified_no_libreoffice" below).
+
+    - Exactly 2 pages on any attempt -> status "verified_two_pages"
+      (the strongest outcome), and stops there.
+    - An overlong render (more than 2 pages) continues on to the next,
+      tighter preset, same as before.
+    - An undersized render (fewer than 2 pages) stops immediately
+      instead of trying tighter presets - a tighter preset can only
+      shrink an already-short document further, so trying one would
+      not help.
+    - If every attempt renders successfully but none lands on exactly
+      2 pages (undersized, or overlong even after the tightest preset),
+      status is "generated_target_not_met": the document from the last
+      attempt is still offered as a fallback download, with a plain
+      "Generated N pages; two-page target not met." message. No content
+      is added or removed to chase the target, and no shortening
+      request is made.
     """
     attempts_root = docx_path.parent / f"_{docx_path.stem}_render_attempts"
 
@@ -547,28 +566,29 @@ def render_and_verify(
                 pdf_path=pdf_path,
                 page_count=page_count,
                 preset_name=preset.name,
-                status="failed_insufficient_content",
+                status="generated_target_not_met",
                 message=(
-                    f"Rendered to {page_count} page(s) using the '{preset.name}' preset - below the "
-                    f"{TARGET_PAGE_COUNT}-page target. A tighter preset would only shrink this further, "
-                    "so none was tried. This needs a decision (add more supported content, or accept a "
-                    f"shorter resume) - not resolved automatically here; no padding or API call was made. "
-                    f"Attempts so far: {attempts}."
+                    f"Generated {page_count} page(s); two-page target not met. Rendered using the "
+                    f"'{preset.name}' preset. A tighter preset would only shrink this further, so none "
+                    "was tried. No content was added or removed, and no shortening request was made - "
+                    f"the document is still available to download. Attempts so far: {attempts}."
                 ),
                 attempts=attempts,
             )
 
         # page_count > TARGET_PAGE_COUNT: overlong, so continue to the next, tighter preset.
 
+    final_page_count = attempts[-1][1]
     return RenderResult(
         docx_path=docx_path,
         pdf_path=last_pdf_path,
-        page_count=attempts[-1][1],
+        page_count=final_page_count,
         preset_name=attempts[-1][0],
-        status="failed_wrong_page_count",
+        status="generated_target_not_met",
         message=(
-            f"Tried {len(attempts)} formatting preset(s); none reached exactly {TARGET_PAGE_COUNT} pages "
-            f"(all remained overlong). Not padding or shortening content to force a match. Attempts: {attempts}."
+            f"Generated {final_page_count} page(s); two-page target not met. Tried {len(attempts)} "
+            f"formatting preset(s), all remained overlong. No content was added or removed, and no "
+            f"shortening request was made - the document is still available to download. Attempts: {attempts}."
         ),
         attempts=attempts,
     )
@@ -625,7 +645,7 @@ def main(argv: Optional[List[str]] = None) -> int:
     print(f"DOCX written to: {result.docx_path}")
     print(f"Status: {result.status}")
     print(result.message)
-    return 0 if result.status == "verified_two_pages" else 1
+    return 0 if result.status in ("verified_two_pages", "generated_target_not_met") else 1
 
 
 if __name__ == "__main__":
