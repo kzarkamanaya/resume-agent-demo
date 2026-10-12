@@ -47,6 +47,7 @@ later milestones.
 from __future__ import annotations
 
 import json
+import os
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Set
@@ -750,11 +751,44 @@ def _format_model(model: Optional[str]) -> str:
     return model if model is not None else "(not reported by the API response)"
 
 
+_SECTION_HEADINGS = {
+    "job": "Professional Experience",
+    "education_training": "Education and Training",
+    "project": "Projects",
+    "skill_category": "Skills",
+}
+
+
+def _section_heading(section_label: str) -> str:
+    """Natural heading for a resume_sections entry's `section` label
+    (e.g. "job" -> "Professional Experience"). Falls back to a
+    title-cased version of the label itself for anything not in
+    _SECTION_HEADINGS, rather than guessing a wrong name."""
+    return _SECTION_HEADINGS.get(section_label, section_label.replace("_", " ").title())
+
+
 def _print_token_usage(usage: Optional[TokenUsage]) -> None:
     if usage is not None:
         print(f"Token usage: input={usage.input_tokens} output={usage.output_tokens} total={usage.total_tokens}")
     else:
         print("Token usage: not reported by the API response.")
+
+
+def _resolve_api_key(env_path: Path) -> Optional[str]:
+    """Load `env_path` (if it exists) with python-dotenv, override=False,
+    and return OPENAI_API_KEY from the environment afterward (or None).
+
+    override=False means a value already present in the real environment
+    always wins over the file - this never inspects or returns anything
+    from `env_path` beyond that one variable, and never errors if the
+    path does not exist (python-dotenv just does nothing in that case).
+    Split out from main() purely so tests can point it at a temporary,
+    synthetic .env file instead of main()'s real one.
+    """
+    from dotenv import load_dotenv
+
+    load_dotenv(dotenv_path=env_path, override=False)
+    return os.environ.get("OPENAI_API_KEY")
 
 
 def main(argv: Optional[List[str]] = None) -> int:
@@ -766,9 +800,12 @@ def main(argv: Optional[List[str]] = None) -> int:
     concise evidence decisions - never the full job text or evidence
     payload that was actually sent.
 
-    Does not read .env or otherwise source credentials itself:
-    OPENAI_API_KEY must already be set in the environment, exactly as
-    OpenAI(max_retries=0) expects on its own.
+    Loads OPENAI_API_KEY from a .env file next to this module, if one
+    exists, using python-dotenv with override=False so a value already
+    present in the real environment always wins over the file. Stops
+    with a fixed message before requesting anything if the key ends up
+    absent or blank either way - this module never reads, displays, or
+    otherwise inspects .env's contents beyond that one variable.
 
     Every OpenAI SDK exception is caught and reported as a fixed, safe
     message - never the raw exception text, a response body, headers,
@@ -807,6 +844,12 @@ def main(argv: Optional[List[str]] = None) -> int:
 
     _metadata, _contact, chunks = load_profile(args.profile)
 
+    env_path = Path(__file__).resolve().parent / ".env"
+    api_key = _resolve_api_key(env_path)
+    if not api_key or not api_key.strip():
+        print("OPENAI_API_KEY is not set - add it to .env (next to decision.py) or the environment, then retry.")
+        return 1
+
     try:
         client = OpenAI(max_retries=0)
     except OpenAIError:
@@ -839,25 +882,33 @@ def main(argv: Optional[List[str]] = None) -> int:
     print(f"Model used: {_format_model(outcome.model)}")
     _print_token_usage(outcome.usage)
 
+    # Maps each entry back to its source Chunk so the exact title already
+    # in the profile (employer/role, degree, project name, skill category)
+    # is shown verbatim - never retyped, invented, or guessed from the draft.
+    chunk_by_id = {chunk.chunk_id: chunk for chunk in chunks}
+
     print()
-    print("Professional summary:")
+    print("Professional Summary")
     print(outcome.decision.professional_summary)
 
-    print()
-    print("Resume sections:")
     for section in outcome.decision.resume_sections:
-        print(f"  [{section.section}]")
+        print()
+        print(_section_heading(section.section))
         for entry in section.entries:
-            print(f"    entry (source: {entry.source_chunk_id}):")
+            source_chunk = chunk_by_id.get(entry.source_chunk_id)
+            title = source_chunk.title if source_chunk is not None else f"(unknown source: {entry.source_chunk_id})"
+            print(f"  {title}")
             for bullet in entry.bullets:
-                print(f"      - {bullet.text}")
+                print(f"    - {bullet.text}")
 
     print()
-    print("Evidence decisions:")
+    print("--- Processing trace (evidence IDs and reasons, not resume content) ---")
+    print("Selected evidence:")
     for item in outcome.decision.selected_evidence:
-        print(f"  selected {item.chunk_id}: {item.reason}")
+        print(f"  {item.chunk_id}: {item.reason}")
+    print("Omitted evidence:")
     for item in outcome.decision.omitted_evidence:
-        print(f"  omitted  {item.chunk_id}: {item.reason}")
+        print(f"  {item.chunk_id}: {item.reason}")
 
     return 0
 

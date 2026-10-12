@@ -14,12 +14,18 @@ behavior or SDK internals.
 Run with: .venv/Scripts/python.exe -m unittest discover -s tests -t . -v
 """
 
+import contextlib
+import io
 import json
+import os
+import tempfile
 import unittest
+from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, Dict, Optional
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 
+import decision
 from retrieval import Chunk
 from decision import (
     DraftingError,
@@ -28,8 +34,10 @@ from decision import (
     build_response_schema,
     collect_full_evidence,
     draft_resume_content,
+    main,
     validate_decision,
 )
+from decision import _resolve_api_key
 
 
 def make_chunk(chunk_id: str, text: str, section: str = "project", title: Optional[str] = None) -> Chunk:
@@ -392,6 +400,16 @@ THREE_CHUNKS = [
 ]
 JOB_TEXT_GENERIC = "Looking for a data analyst with Python and SQL experience."
 
+# Distinct titles (not equal to the chunk_id) so presentation tests can
+# prove the CLI looks up and shows the real source title, not the id.
+PRESENTATION_CHUNKS = [
+    make_chunk("a", "Built Python data pipelines for analytics.", section="job", title="Acme Corp — Data Analyst"),
+    make_chunk("b", "Used SQL and pandas for reporting.", section="project", title="Reporting Dashboard Project"),
+    make_chunk(
+        "c", "Mechanical design coursework in CAD.", section="education_training", title="B.S. in Mechanical Engineering"
+    ),
+]
+
 
 class TestDraftResumeContent(unittest.TestCase):
     def test_successful_parsing(self):
@@ -497,6 +515,127 @@ class TestDraftResumeContent(unittest.TestCase):
 
         self.assertEqual(create.call_count, 0)  # rejected before touching the client
         with_options.assert_not_called()
+
+
+class TestResolveApiKey(unittest.TestCase):
+    """_resolve_api_key() tested against a temporary, synthetic .env
+    file only - never the real project .env. Each test saves/restores
+    os.environ so nothing leaks into other tests or the real session."""
+
+    def setUp(self):
+        self._env_patch = patch.dict(os.environ, {}, clear=False)
+        self._env_patch.start()
+        self.addCleanup(self._env_patch.stop)
+        os.environ.pop("OPENAI_API_KEY", None)
+
+    def test_reads_key_from_env_file_when_absent_from_environment(self):
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            env_path = Path(tmp_dir) / ".env"
+            env_path.write_text("OPENAI_API_KEY=sk-synthetic-test-key\n", encoding="utf-8")
+
+            self.assertEqual(_resolve_api_key(env_path), "sk-synthetic-test-key")
+
+    def test_real_environment_value_wins_over_file_override_false(self):
+        os.environ["OPENAI_API_KEY"] = "sk-real-env-value"
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            env_path = Path(tmp_dir) / ".env"
+            env_path.write_text("OPENAI_API_KEY=sk-synthetic-file-value\n", encoding="utf-8")
+
+            self.assertEqual(_resolve_api_key(env_path), "sk-real-env-value")
+
+    def test_missing_env_file_returns_none_without_error(self):
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            env_path = Path(tmp_dir) / ".env"  # deliberately never created
+
+            self.assertIsNone(_resolve_api_key(env_path))
+
+
+class TestMainApiKeyGate(unittest.TestCase):
+    """main()'s "no key -> stop before requesting anything" and
+    "key present -> proceeds" behavior, using a synthetic key string
+    and a mocked OpenAI client/response. No network call, and
+    _resolve_api_key is mocked directly so main()'s real .env (beside
+    decision.py) is never touched either way."""
+
+    def setUp(self):
+        self.fake_extraction = SimpleNamespace(full_text="A generic job description.", warnings=[])
+
+    def test_stops_without_requesting_when_key_missing(self):
+        with patch("decision.extract_pdf_text", return_value=self.fake_extraction), patch(
+            "decision.load_profile", return_value=({}, {}, THREE_CHUNKS)
+        ), patch("decision._resolve_api_key", return_value=None), patch(
+            "openai.OpenAI"
+        ) as mock_openai_cls:
+            exit_code = main(["dummy.pdf", "--model", "gpt-test"])
+
+        self.assertEqual(exit_code, 1)
+        mock_openai_cls.assert_not_called()
+
+    def test_proceeds_past_key_check_when_key_present(self):
+        response = _fake_response(
+            output=[_fake_text_message(json.dumps(_base_raw()))],
+            usage=_fake_usage(),
+            model="gpt-test-2026-01-01",
+        )
+        fake_client, create, with_options = _fake_client(response)
+
+        with patch("decision.extract_pdf_text", return_value=self.fake_extraction), patch(
+            "decision.load_profile", return_value=({}, {}, THREE_CHUNKS)
+        ), patch("decision._resolve_api_key", return_value="sk-synthetic-test-key"), patch(
+            "openai.OpenAI", return_value=fake_client
+        ) as mock_openai_cls:
+            exit_code = main(["dummy.pdf", "--model", "gpt-test"])
+
+        mock_openai_cls.assert_called_once_with(max_retries=0)
+        self.assertEqual(create.call_count, 1)
+        self.assertEqual(exit_code, 0)
+
+
+class TestMainDraftPresentation(unittest.TestCase):
+    """main()'s printed output for a mocked draft: exact source titles
+    (looked up from the already-loaded chunks, never invented), natural
+    section headings with no brackets/generic label, and the evidence
+    trace kept separate from and after the resume content. No network
+    call and no .env read - the client/response and the API key are
+    both mocked/injected directly."""
+
+    def test_shows_source_titles_natural_headings_and_separated_trace(self):
+        response = _fake_response(
+            output=[_fake_text_message(json.dumps(_base_raw()))],
+            usage=_fake_usage(),
+            model="gpt-test-2026-01-01",
+        )
+        fake_client, create, with_options = _fake_client(response)
+        fake_extraction = SimpleNamespace(full_text="A generic job description.", warnings=[])
+
+        buffer = io.StringIO()
+        with patch("decision.extract_pdf_text", return_value=fake_extraction), patch(
+            "decision.load_profile", return_value=({}, {}, PRESENTATION_CHUNKS)
+        ), patch("decision._resolve_api_key", return_value="sk-synthetic-test-key"), patch(
+            "openai.OpenAI", return_value=fake_client
+        ), contextlib.redirect_stdout(buffer):
+            exit_code = main(["dummy.pdf", "--model", "gpt-test"])
+
+        output = buffer.getvalue()
+        self.assertEqual(exit_code, 0)
+
+        # Exact source title from the loaded chunk, not a generic "entry (source: ...)" line.
+        self.assertIn("Acme Corp — Data Analyst", output)
+        self.assertNotIn("entry (source:", output)
+
+        # Natural heading, no brackets, no generic "Resume sections:" label.
+        self.assertIn("Professional Experience", output)
+        self.assertNotIn("[job]", output)
+        self.assertNotIn("Resume sections:", output)
+
+        # Evidence IDs/reasons form a separate trace, appearing after the resume content.
+        self.assertIn("Processing trace", output)
+        self.assertIn("a: Directly relevant job experience.", output)
+        summary_index = output.index("Professional Summary")
+        title_index = output.index("Acme Corp — Data Analyst")
+        trace_index = output.index("Processing trace")
+        self.assertLess(summary_index, title_index)
+        self.assertLess(title_index, trace_index)
 
 
 if __name__ == "__main__":
