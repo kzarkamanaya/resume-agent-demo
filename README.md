@@ -2,6 +2,10 @@
 
 This application turns a job-description PDF and a local candidate profile into an evidence-based, tailored Word resume, while showing its decisions and verifying a two-page layout.
 
+## Problem it solves
+
+Tailoring a resume to a job description takes time and can introduce unsupported claims. This application uses a job-description PDF and a local candidate profile to generate a tailored Word resume grounded in the candidate’s information. It shows which evidence was selected or omitted and checks the rendered page count, aiming for a readable two-page result.
+
 ## Demo data disclosure
 
 Any candidate data in this repository, including `resume_profile.md`, is fictionalized demo data created for this project and does not describe a real person. A real profile, if you ever use one, belongs in the local-only, Git-ignored `private/` folder - never in `resume_profile.md` as committed here.
