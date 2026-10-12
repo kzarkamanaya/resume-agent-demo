@@ -1,0 +1,18 @@
+# Secrets / environment files
+.env
+.env.*
+!.env.example
+
+# Python virtual environment
+.venv/
+venv/
+
+# Python caches
+__pycache__/
+*.pyc
+*.pyo
+.pytest_cache/
+
+# Local-only candidate data and generated output
+private/
+outputs/
