@@ -67,7 +67,8 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Set, Tuple
 
 from docx import Document
-from docx.shared import Inches, Pt
+from docx.enum.text import WD_ALIGN_PARAGRAPH
+from docx.shared import Inches, Pt, RGBColor
 from pypdf import PdfReader
 
 from decision import (
@@ -289,19 +290,11 @@ def build_docx(
 
     _add_contact_header(document, contact)
 
-    summary_heading = document.add_paragraph()
-    summary_heading.paragraph_format.keep_with_next = True
-    run = summary_heading.add_run("Professional Summary")
-    run.bold = True
-    run.font.size = Pt(preset.body_font_pt + 1)
+    _add_major_heading(document, "Professional Summary")
     document.add_paragraph(decision.professional_summary)
 
     for section in _ordered_sections(decision):
-        section_heading = document.add_paragraph()
-        section_heading.paragraph_format.keep_with_next = True
-        run = section_heading.add_run(_section_heading(section.section))
-        run.bold = True
-        run.font.size = Pt(preset.body_font_pt + 1)
+        _add_major_heading(document, _section_heading(section.section))
 
         for entry in section.entries:
             chunk = chunk_by_id[entry.source_chunk_id]
@@ -309,6 +302,7 @@ def build_docx(
             title_paragraph.paragraph_format.keep_with_next = True
             title_run = title_paragraph.add_run(chunk.title)
             title_run.bold = True
+            title_run.font.size = Pt(preset.body_font_pt)
 
             header = headers.get(entry.source_chunk_id)
             if header is not None and header.ok:
@@ -325,20 +319,46 @@ def build_docx(
     document.save(str(output_path))
 
 
+def _add_major_heading(document: "Document", text: str) -> None:
+    """A major heading (Professional Summary, Professional Experience,
+    etc.): 12pt bold black, with a little space before/after to stand
+    out clearly from body text, while staying attached to the content
+    under it (keep_with_next) - never pushed onto its own page."""
+    heading = document.add_paragraph()
+    heading.alignment = WD_ALIGN_PARAGRAPH.LEFT
+    heading.paragraph_format.keep_with_next = True
+    heading.paragraph_format.space_before = Pt(8)
+    heading.paragraph_format.space_after = Pt(4)
+    run = heading.add_run(text)
+    run.bold = True
+    run.font.size = Pt(12)
+    run.font.color.rgb = RGBColor(0, 0, 0)
+
+
 def _add_contact_header(document: "Document", contact: Dict[str, str]) -> None:
     """Local-only contact header: whatever fields are present, shown
-    exactly as parsed - never a placeholder for a missing one."""
+    exactly as parsed - never a placeholder for a missing one. Name is
+    left-aligned; phone/email share one line; the full address (if any)
+    is its own, separate paragraph."""
     name = contact.get("Name")
     if name:
         heading = document.add_paragraph()
+        heading.alignment = WD_ALIGN_PARAGRAPH.LEFT
         heading.paragraph_format.keep_with_next = True
         run = heading.add_run(name)
         run.bold = True
         run.font.size = Pt(16)
 
-    line_parts = [contact[key] for key in ("Phone", "Email", "Address") if contact.get(key)]
-    if line_parts:
-        document.add_paragraph(" | ".join(line_parts))
+    phone_email_parts = [contact[key] for key in ("Phone", "Email") if contact.get(key)]
+    if phone_email_parts:
+        line = document.add_paragraph(" | ".join(phone_email_parts))
+        line.alignment = WD_ALIGN_PARAGRAPH.LEFT
+        line.paragraph_format.keep_with_next = True
+
+    address = contact.get("Address")
+    if address:
+        address_paragraph = document.add_paragraph(address)
+        address_paragraph.alignment = WD_ALIGN_PARAGRAPH.LEFT
 
 
 def convert_docx_to_pdf(docx_path: Path, attempt_dir: Path, soffice_path: Path, timeout_seconds: int = 45) -> Path:

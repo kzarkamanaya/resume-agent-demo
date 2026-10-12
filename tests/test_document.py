@@ -216,6 +216,49 @@ class TestBuildDocx(unittest.TestCase):
         self.assertEqual(list_bullet.font.name, "Calibri")
         self.assertAlmostEqual(list_bullet.font.size.pt, preset.body_font_pt)
 
+    def test_major_headings_are_12pt_bold_black_with_spacing_and_kept_with_next(self):
+        preset = FORMATTING_PRESETS[0]
+        build_docx(GOOD_DECISION, GOOD_CONTACT, ALL_CHUNKS, self.docx_path, preset)
+
+        doc = DocxDocument(str(self.docx_path))
+        heading_texts = {"Professional Summary", "Professional Experience", "Education and Training", "Projects", "Skills"}
+        headings = [p for p in doc.paragraphs if p.text in heading_texts]
+        self.assertTrue(headings)
+
+        for heading in headings:
+            run = heading.runs[0]
+            self.assertTrue(run.bold)
+            self.assertAlmostEqual(run.font.size.pt, 12)
+            self.assertEqual(run.font.color.rgb, document.RGBColor(0, 0, 0))
+            self.assertAlmostEqual(heading.paragraph_format.space_before.pt, 8)
+            self.assertAlmostEqual(heading.paragraph_format.space_after.pt, 4)
+            self.assertTrue(heading.paragraph_format.keep_with_next)
+
+        # Entry titles stay bold at the preset body size, not the heading size.
+        title_paragraph = next(p for p in doc.paragraphs if p.text == "Acme Corp — Data Analyst")
+        self.assertTrue(title_paragraph.runs[0].bold)
+        self.assertAlmostEqual(title_paragraph.runs[0].font.size.pt, preset.body_font_pt)
+
+    def test_contact_header_splits_phone_email_line_from_address(self):
+        contact = {
+            "Name": "Jordan Example",
+            "Phone": "+1 555-0100",
+            "Email": "jordan@example.com",
+            "Address": "123 Main St, Springfield, IL",
+        }
+        build_docx(GOOD_DECISION, contact, ALL_CHUNKS, self.docx_path, FORMATTING_PRESETS[0])
+
+        doc = DocxDocument(str(self.docx_path))
+        texts = [p.text for p in doc.paragraphs]
+
+        self.assertIn("+1 555-0100 | jordan@example.com", texts)
+        self.assertIn("123 Main St, Springfield, IL", texts)
+        # Address must not be merged onto the phone/email line.
+        self.assertNotIn("+1 555-0100 | jordan@example.com | 123 Main St, Springfield, IL", texts)
+
+        name_paragraph = next(p for p in doc.paragraphs if p.text == "Jordan Example")
+        self.assertEqual(name_paragraph.alignment, document.WD_ALIGN_PARAGRAPH.LEFT)
+
     def test_raises_before_writing_when_job_header_cannot_be_extracted(self):
         broken_decision = DraftResult(
             professional_summary="Summary.",
